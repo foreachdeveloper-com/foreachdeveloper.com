@@ -71,23 +71,44 @@ export function start(hero, mark, onExit) {
 	hero.append(canvas, quit);
 	const ctx = canvas.getContext("2d");
 
+	// The play area is the hero, cut to the viewport height so the ship is never below the fold
 	let W = 0;
 	let H = 0;
+	let invaders = [];
+	const ship = { x: 0, alive: true, cool: 0 };
 	function resize() {
 		const r = hero.getBoundingClientRect();
 		const dpr = Math.min(2, devicePixelRatio || 1);
 		W = r.width;
-		H = r.height;
-		canvas.width = W * dpr;
-		canvas.height = H * dpr;
+		H = Math.min(r.height, innerHeight);
+		canvas.style.height = `${H}px`;
+		canvas.width = Math.round(W * dpr);
+		canvas.height = Math.round(H * dpr);
 		ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+		ship.x = clampShip(ship.x);
+		// Pull the formation back inside a narrower screen, or it would bounce on the wall and drop every step
+		if (invaders.length) {
+			const over = Math.max(...invaders.map((i) => i.x + i.w)) - (W - 12);
+			const room = Math.min(...invaders.map((i) => i.x)) - 12;
+			const dx = Math.min(over, room);
+			if (dx > 0) for (const i of invaders) i.x -= dx;
+		}
+	}
+	// Narrow or short screens get smaller invaders and smaller steps
+	function small() {
+		return W < 480 || H < 500;
+	}
+	function clampShip(x) {
+		return Math.max(SHIP_W / 2 + 8, Math.min(W - SHIP_W / 2 - 8, x));
 	}
 	resize();
 
+	const hr = hero.getBoundingClientRect();
+	if (hr.top < 0 || hr.top + H > innerHeight) scrollBy({ top: hr.top, behavior: "smooth" });
+
 	// Ship starts where the mark was, so it feels like the logo dropped into place
 	const mr = mark.getBoundingClientRect();
-	const hr = hero.getBoundingClientRect();
-	const ship = { x: mr.left - hr.left + mr.width / 2, alive: true, cool: 0 };
+	ship.x = clampShip(mr.left - hr.left + mr.width / 2);
 
 	let state = "ready";
 	let stateTime = 0;
@@ -96,7 +117,6 @@ export function start(hero, mark, onExit) {
 	let wave = 0;
 	let shake = 0;
 	let quip = QUIPS[0];
-	let invaders = [];
 	let formation = { dx: 1, timer: 0, frame: 0 };
 	let shots = [];
 	let bombs = [];
@@ -108,17 +128,19 @@ export function start(hero, mark, onExit) {
 	function nextWave() {
 		wave++;
 		invaders = [];
-		const px = W < 480 ? 2 : PX;
+		const px = small() ? 2 : PX;
 		const cellW = Math.min(CELL_W, Math.floor((W - 64) / COLS));
-		const cellH = W < 480 ? 32 : CELL_H;
+		const cellH = small() ? 32 : CELL_H;
 		const gridW = COLS * cellW;
 		const left = Math.max(16, (W - gridW) / 2);
+		// Later waves start lower, but only where the screen leaves room to play
+		const lower = Math.min(Math.min(wave - 1, 4) * 12, Math.max(0, H - 520));
 		ROWS.forEach((row, r) => {
 			for (let c = 0; c < COLS; c++) {
 				const w = SPRITES[row.kind][0][0].length * px;
 				invaders.push({
 					x: left + c * cellW + (cellW - w) / 2,
-					y: 70 + r * cellH + Math.min(wave - 1, 4) * 12,
+					y: 70 + r * cellH + lower,
 					w,
 					h: 8 * px,
 					px,
@@ -178,7 +200,7 @@ export function start(hero, mark, onExit) {
 		if (keys.has("left")) ship.x -= speed * dt;
 		if (keys.has("right")) ship.x += speed * dt;
 		if (pointerX !== null) ship.x += (pointerX - ship.x) * Math.min(1, dt * 14);
-		ship.x = Math.max(SHIP_W / 2 + 8, Math.min(W - SHIP_W / 2 - 8, ship.x));
+		ship.x = clampShip(ship.x);
 		ship.cool -= dt;
 		if (keys.has("fire") || (touch && pointerX !== null)) fire();
 
@@ -192,8 +214,8 @@ export function start(hero, mark, onExit) {
 		if (formation.timer <= 0) {
 			formation.timer = interval;
 			formation.frame ^= 1;
-			const step = (W < 480 ? 6 : 10) * formation.dx;
-			const drop = W < 480 ? 12 : 16;
+			const step = (small() ? 6 : 10) * formation.dx;
+			const drop = small() ? 12 : 16;
 			const minX = Math.min(...invaders.map((i) => i.x));
 			const maxX = Math.max(...invaders.map((i) => i.x + i.w));
 			if (maxX + step > W - 12 || minX + step < 12) {
@@ -214,7 +236,10 @@ export function start(hero, mark, onExit) {
 			bombs.push({ x: low.x + low.w / 2, y: low.y + low.h, t: 0 });
 		}
 
-		for (const s of shots) s.y -= 620 * dt;
+		for (const s of shots) {
+			s.py = s.y;
+			s.y -= 620 * dt;
+		}
 		shots = shots.filter((s) => s.y > -10);
 		for (const b of bombs) {
 			b.y += (220 + wave * 20) * dt;
@@ -222,9 +247,10 @@ export function start(hero, mark, onExit) {
 		}
 		bombs = bombs.filter((b) => b.y < H + 10);
 
-		// Shots vs invaders
+		// Shots vs invaders; a shot covers its whole path this frame so a slow frame can't jump it over a row
 		for (const s of shots) {
-			const hit = invaders.find((i) => s.x > i.x - 3 && s.x < i.x + i.w + 3 && s.y > i.y && s.y < i.y + i.h);
+			const hits = invaders.filter((i) => s.x > i.x - 3 && s.x < i.x + i.w + 3 && s.y < i.y + i.h && s.py > i.y);
+			const hit = hits.sort((a, b) => b.y - a.y)[0];
 			if (hit) {
 				s.y = -100;
 				invaders.splice(invaders.indexOf(hit), 1);
@@ -388,21 +414,35 @@ export function start(hero, mark, onExit) {
 		}
 	}
 
+	// Scrolled away, the game pauses and gives the keys back to the page
+	let onScreen = true;
+	const seen = new IntersectionObserver(([entry]) => {
+		onScreen = entry.intersectionRatio >= 0.5;
+		if (!onScreen) release();
+	}, { threshold: [0, 0.5, 1] });
+	seen.observe(canvas);
+
 	let raf = 0;
 	let last = performance.now();
 	function loop(now) {
 		const dt = Math.min(0.05, (now - last) / 1000);
 		last = now;
-		update(dt);
+		if (onScreen) update(dt);
 		draw();
 		raf = requestAnimationFrame(loop);
+	}
+
+	// Keys released while the window had no focus never send keyup
+	function release() {
+		keys.clear();
+		if (touch) pointerX = null;
 	}
 
 	const KEYMAP = { ArrowLeft: "left", a: "left", A: "left", ArrowRight: "right", d: "right", D: "right", " ": "fire", ArrowUp: "fire", w: "fire", W: "fire" };
 	function onKeyDown(e) {
 		if (e.key === "Escape") return stop();
 		const k = KEYMAP[e.key];
-		if (!k) return;
+		if (!k || !onScreen) return;
 		e.preventDefault();
 		if (k !== "fire") pointerX = null;
 		if (state === "over" && k === "fire" && stateTime > 0.8) return reset();
@@ -429,11 +469,17 @@ export function start(hero, mark, onExit) {
 		if (!touch) pointerX = null;
 	}
 
+	let stopped = false;
 	function stop() {
+		if (stopped) return;
+		stopped = true;
 		cancelAnimationFrame(raf);
+		seen.disconnect();
 		removeEventListener("keydown", onKeyDown);
 		removeEventListener("keyup", onKeyUp);
 		removeEventListener("resize", resize);
+		removeEventListener("blur", release);
+		document.removeEventListener("visibilitychange", release);
 		canvas.remove();
 		quit.remove();
 		onExit?.();
@@ -442,6 +488,8 @@ export function start(hero, mark, onExit) {
 	addEventListener("keydown", onKeyDown);
 	addEventListener("keyup", onKeyUp);
 	addEventListener("resize", resize);
+	addEventListener("blur", release);
+	document.addEventListener("visibilitychange", release);
 	canvas.addEventListener("pointerdown", onPointerDown);
 	canvas.addEventListener("pointermove", (e) => (touch ? pointerX !== null && onPointer(e) : onPointer(e)));
 	canvas.addEventListener("pointerup", onPointerUp);

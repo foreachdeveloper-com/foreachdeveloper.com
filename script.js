@@ -154,6 +154,7 @@
 	const heroMark = document.querySelector(".hero-mark");
 	const dots = heroMark ? [...heroMark.querySelectorAll("circle")] : [];
 	let game = null;
+	let starting = false;
 	let charge = 0;
 	let chargeTimer;
 	function discharge() {
@@ -162,7 +163,8 @@
 		heroMark.classList.remove("charged");
 	}
 	heroMark?.addEventListener("click", async () => {
-		if (game) return;
+		// Clicks that land while game.js is still loading must not start a second game
+		if (game || starting) return;
 		clearTimeout(chargeTimer);
 		dots[charge]?.classList.add("lit");
 		charge++;
@@ -174,16 +176,26 @@
 			return;
 		}
 		heroMark.classList.add("charged");
-		const { start } = await import("/game.js");
+		starting = true;
+		let start;
+		try {
+			({ start } = await import("/game.js"));
+		} catch {
+			discharge();
+			return;
+		} finally {
+			starting = false;
+		}
 		heroEl.classList.add("playing");
 		game = start(heroEl, heroMark, () => {
 			game = null;
 			heroEl.classList.remove("playing");
 			discharge();
 		});
-		say(touch
-			? "<b>YOLO mode on.</b> One life, no confirmations. Drag to move, hold to fire."
-			: "<b>YOLO mode on.</b> One life, no confirmations. ← → move, space fire.");
+		// On phones, or when the game fills the screen, the toast would sit on the ship; the game shows its own hint
+		if (!touch && heroEl.offsetHeight < innerHeight) {
+			say("<b>YOLO mode on.</b> One life, no confirmations. ← → move, space fire.");
+		}
 	});
 
 	// ↑ ↑ ↓ ↓ ← → ← → B A
